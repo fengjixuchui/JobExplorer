@@ -8,9 +8,15 @@
 #include "aboutdlg.h"
 #include "View.h"
 #include "MainFrm.h"
+#include "ClipboardHelper.h"
+#include "SecurityHelper.h"
+#include "ProcessHelper.h"
 
 BOOL CMainFrame::PreTranslateMessage(MSG* pMsg) {
 	if (CFrameWindowImpl<CMainFrame>::PreTranslateMessage(pMsg))
+		return TRUE;
+
+	if (m_pFind && m_pFind->IsDialogMessageW(pMsg))
 		return TRUE;
 
 	return m_view.PreTranslateMessage(pMsg);
@@ -27,7 +33,7 @@ void CMainFrame::SelectJob(void * address) {
 
 void CMainFrame::InitializeTree() {
 	m_Images.Create(16, 16, ILC_COLOR32 | ILC_COLOR, 4, 4);
-	UINT ids[] = { IDI_PARENTJOB, IDI_CHILDJOB, IDR_MAINFRAME, IDI_PROCESS };
+	UINT ids[] = { IDI_PARENTJOB, IDI_CHILDJOB, IDR_MAINFRAME, IDI_PROCESS, IDI_PROCESSES };
 	for(auto id : ids)
 		m_Images.AddIcon(AtlLoadIcon(id));
 
@@ -41,6 +47,8 @@ void CMainFrame::RefreshTree() {
 	CWaitCursor wait;
 	m_Tree.DeleteAllItems();
 	m_AllJobsNode = m_Tree.InsertItem(L"Job List", 2, 2, TVI_ROOT, TVI_LAST);
+	//m_ProcessesNode = m_Tree.InsertItem(L"Processes", 4, 4, TVI_ROOT, TVI_LAST);
+
 	m_JobsMap.clear();
 
 	m_JobMgr.EnumJobObjects();
@@ -51,6 +59,7 @@ void CMainFrame::RefreshTree() {
 			AddJobNode(job.get(), TVI_ROOT, 0);
 		}
 	}
+	m_AllJobsNode.Expand(TVE_EXPAND);
 	m_AllJobsNode.Select();
 	m_Tree.LockWindowUpdate(FALSE);
 }
@@ -64,33 +73,85 @@ void CMainFrame::ExpandAll(bool expand) {
 	m_Tree.LockWindowUpdate(FALSE);
 }
 
-CString CMainFrame::GetProcessImageName(DWORD pid) {
-	wil::unique_handle hProcess(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
-	if (hProcess) {
-		WCHAR path[MAX_PATH];
-		DWORD size = MAX_PATH;
-		if (::QueryFullProcessImageName(hProcess.get(), 0, path, &size))
-			return ::wcsrchr(path, L'\\') + 1;
-	}
-	return L"";
-}
-
 void CMainFrame::AddJobNode(JobObjectEntry* job, HTREEITEM parent, int icon) {
 	CString text;
 	text.Format(L"0x%p", job->Object);
-	if (!job->Name.empty())
-		text += CString(L" (") + job->Name.c_str() + L")";
+	if (!job->Name.IsEmpty())
+		text += CString(L" (") + job->Name + L")";
 	auto node = m_Tree.InsertItem(text, icon, icon, parent, TVI_LAST);
 	node.SetData((DWORD_PTR)job->Object);
 	m_JobsMap.insert({ job->Object, node.m_hTreeItem });
 	for (auto& child : job->ChildJobs)
 		AddJobNode(child, node.m_hTreeItem, 1);
 	for (auto pid : job->Processes) {
-		CString name = GetProcessImageName((DWORD)pid);
+		CString name = ProcessHelper::GetProcessName((DWORD)pid);
 		text.Format(L"%s (%d)", name, pid);
 		m_Tree.InsertItem(text, 3, 3, node, TVI_LAST);
 	}
 	//m_Tree.Expand(node.m_hTreeItem, TVE_EXPAND);
+}
+
+LRESULT CMainFrame::OnEditFind(WORD, WORD, HWND, BOOL&) {
+	if (m_pFind == nullptr || m_pFind->IsTerminating()) {
+		m_pFind = new CFindReplaceDialog;
+		m_pFind->Create(TRUE, nullptr);
+		m_pFind->ShowWindow(SW_SHOWDEFAULT);
+	}
+	return 0;
+}
+
+LRESULT CMainFrame::OnFind(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	ATLASSERT(m_pFind);
+	if (m_pFind->IsTerminating()) {
+		m_pFind = nullptr;
+		return 0;
+	}
+	auto isDown = m_pFind->SearchDown();
+
+	CString text(m_pFind->GetFindString());
+	text.MakeUpper();
+
+	auto item = m_Tree.GetSelectedItem();
+	for (;;) {
+		item = isDown ? item.GetNextVisible() : item.GetPrevVisible();
+		if (item == nullptr)
+			break;
+		std::shared_ptr<JobObjectEntry> job;
+		while (job == nullptr && item != nullptr) {
+			job = m_JobMgr.GetJobByObject((void*)item.GetData());
+			if (job != nullptr)
+				break;
+			item = isDown ? item.GetNextVisible() : item.GetPrevVisible();
+		}
+
+		if (job) {
+			bool found = false;
+			CString name(job->Name);
+			name.MakeUpper();
+			if (name.Find(text) >= 0) {
+				found = true;
+				break;
+			}
+			if (!found) {
+				for (auto& p : job->Processes) {
+					auto pname = ProcessHelper::GetProcessName((DWORD)p);
+					pname.MakeUpper();
+					if (pname.Find(text) >= 0) {
+						found = true;
+						break;
+					}
+				}
+			}
+			if (found) {
+				item.Select();
+				m_FindPos = item;
+				return 0;
+			}
+		}
+	}
+	MessageBox(L"Job/process not found", L"Job Explorer");
+	m_FindPos = nullptr;
+	return 0;
 }
 
 LRESULT CMainFrame::OnTreeSelectionChanged(int, LPNMHDR, BOOL&) {
@@ -117,13 +178,26 @@ LRESULT CMainFrame::OnTreeExpanding(int, LPNMHDR hdr, BOOL &) {
 }
 
 LRESULT CMainFrame::OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-	// create command bar window
 	HWND hWndCmdBar = m_CmdBar.Create(m_hWnd, rcDefault, nullptr, ATL_SIMPLE_CMDBAR_PANE_STYLE);
-	// attach menu
-	m_CmdBar.AttachMenu(GetMenu());
-	// load command bar images
+	CMenuHandle menu = GetMenu();
+
+	if (SecurityHelper::IsRunningElevated()) {
+		// delete menu item
+		menu.GetSubMenu(0).DeleteMenu(ID_FILE_RUNASADMINISTRATOR, MF_BYCOMMAND);
+		menu.GetSubMenu(0).DeleteMenu(0, MF_BYPOSITION);	// delete separator
+
+		CString text;
+		GetWindowText(text);
+		text += L" (Administrator)";
+		SetWindowText(text);
+	}
+	else {
+		m_CmdBar.AddIcon(SecurityHelper::GetShieldIcon(), ID_FILE_RUNASADMINISTRATOR);
+	}
+
+	m_CmdBar.AttachMenu(menu);
 	m_CmdBar.LoadImages(IDR_MAINFRAME);
-	// remove old menu
+
 	SetMenu(nullptr);
 
 	HWND hWndToolBar = CreateSimpleToolBarCtrl(m_hWnd, IDR_MAINFRAME, FALSE, ATL_SIMPLE_TOOLBAR_PANE_STYLE);
@@ -157,6 +231,7 @@ LRESULT CMainFrame::OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/
 	pLoop->AddIdleHandler(this);
 
 	InitializeTree();
+	m_Tree.SetFocus();
 
 	return 0;
 }
@@ -174,12 +249,6 @@ LRESULT CMainFrame::OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*
 
 LRESULT CMainFrame::OnFileExit(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/) {
 	PostMessage(WM_CLOSE);
-	return 0;
-}
-
-LRESULT CMainFrame::OnFileNew(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/) {
-	// TODO: add code to initialize document
-
 	return 0;
 }
 
@@ -228,6 +297,36 @@ LRESULT CMainFrame::OnViewExpandAll(WORD, WORD, HWND, BOOL &) {
 
 LRESULT CMainFrame::OnViewCollapseAll(WORD, WORD, HWND, BOOL &) {
 	ExpandAll(false);
+	return 0;
+}
+
+LRESULT CMainFrame::OnEditCopy(WORD, WORD, HWND, BOOL &handled) {
+	if (::GetFocus() == m_Tree) {
+		CString text;
+		m_Tree.GetItemText(m_Tree.GetSelectedItem(), text);
+		ClipboardHelper::CopyText(*this, text);
+	}
+	else {
+		handled = FALSE;
+	}
+	return 0;
+}
+
+LRESULT CMainFrame::OnRunAsAdmin(WORD, WORD, HWND, BOOL &) {
+	WCHAR path[MAX_PATH];
+	DWORD size = MAX_PATH;
+	if (::QueryFullProcessImageName(::GetCurrentProcess(), 0, path, &size)) {
+		SHELLEXECUTEINFO shex = { sizeof(shex) };
+		shex.lpVerb = L"runas";
+		shex.lpFile = path;
+		shex.nShow = SW_SHOWDEFAULT;
+		if (::ShellExecuteEx(&shex)) {
+			PostMessage(WM_CLOSE);
+			return 0;
+		}
+	}
+
+	MessageBox(L"Elevation failed", L"Job Explorer");
 	return 0;
 }
 

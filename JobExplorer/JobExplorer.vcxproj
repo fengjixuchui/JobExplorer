@@ -202,10 +202,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AboutDlg.cpp" />
+    <ClCompile Include="ClipboardHelper.cpp" />
     <ClCompile Include="FormatHelper.cpp" />
     <ClCompile Include="JobExplorer.cpp" />
     <ClCompile Include="JobManager.cpp" />
     <ClCompile Include="MainFrm.cpp" />
+    <ClCompile Include="ProcessHelper.cpp" />
+    <ClCompile Include="SecurityHelper.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -216,12 +219,15 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AboutDlg.h" />
+    <ClInclude Include="ClipboardHelper.h" />
     <ClInclude Include="FormatHelper.h" />
     <ClInclude Include="IFrame.h" />
     <ClInclude Include="JobManager.h" />
     <ClInclude Include="MainFrm.h" />
     <ClInclude Include="NtDll.h" />
+    <ClInclude Include="ProcessHelper.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="SecurityHelper.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="UndocListView.h" />
     <ClInclude Include="View.h" />

@@ -9,6 +9,8 @@
 #include "FormatHelper.h"
 #include <algorithm>
 #include "IFrame.h"
+#include "ClipboardHelper.h"
+#include "ProcessHelpers.h"
 
 BOOL CView::PreTranslateMessage(MSG* pMsg) {
 	pMsg;
@@ -65,7 +67,7 @@ void CView::RefreshJob(const std::shared_ptr<JobObjectEntry>& job) {
 
 		m_List.InsertColumn(0, L"Process Name", LVCFMT_LEFT, 270);
 		m_List.InsertColumn(1, L"PID", LVCFMT_LEFT, 300);
-		m_List.InsertColumn(2, L"Start Time", LVCFMT_LEFT, 200);
+		m_List.InsertColumn(2, L"Start Time", LVCFMT_LEFT, 300);
 		//m_List.InsertColumn(3, L"Full Image Path", LVCFMT_LEFT, 700);
 
 		m_List.ModifyStyle(0, LVS_NOCOLUMNHEADER);
@@ -94,8 +96,13 @@ void CView::RefreshJob(const std::shared_ptr<JobObjectEntry>& job) {
 	group.pszHeader = L"Limits";
 	m_List.InsertGroup(-1, &group);
 
+	group.iGroupId = 4;
+	group.cItems = (int)m_Job->OpenHandles.size();
+	group.pszHeader = L"Open Handles";
+	m_List.InsertGroup(-1, &group);
+
 	m_List.EnableGroupView(TRUE);
-	m_List.SetItemCount(30000);
+	m_List.SetItemCount(4000);
 }
 
 void CView::DoSort(const SortInfo * si) {
@@ -108,6 +115,25 @@ void CView::DoSort(const SortInfo * si) {
 
 void CView::SetFrame(IFrame *pFrame) {
 	m_pFrame = pFrame;
+}
+
+LRESULT CView::OnEditCopy(WORD, WORD, HWND, BOOL &) {
+	CString text;
+	for (int i = 0; i < m_List.GetItemCount(); i++) {
+		bool anytext = false;
+		for (int c = 0; c < 10; c++) {
+			CString str;
+			if (m_List.GetItemText(i, c, str) && !str.IsEmpty()) {
+				text += str + L"\t";
+				anytext = true;
+			}
+		}
+		if(anytext)
+			text += L"\r\n";
+	}
+	ClipboardHelper::CopyText(*this, text);
+
+	return 0;
 }
 
 LRESULT CView::OnDestroy(UINT, WPARAM, LPARAM, BOOL &) {
@@ -180,7 +206,7 @@ void CView::GetDispInfoJobList(NMLVDISPINFO * di) {
 				break;
 
 			case 0:		// name
-				item.pszText = (PWSTR)data->Name.c_str();
+				item.pszText = (PWSTR)(PCWSTR)data->Name;
 				break;
 
 			case 2:		// active processes
@@ -219,8 +245,8 @@ void CView::GetDispInfoJobList(NMLVDISPINFO * di) {
 
 void CView::GetDispInfoJob(NMLVDISPINFO * di) {
 	auto& item = di->item;
-	int group = item.iItem / 10000;
-	int index = item.iItem % 10000;
+	int group = item.iItem / 1000;
+	int index = item.iItem % 1000;
 	if (item.mask & LVIF_TEXT) {
 		switch (group) {
 			case 0:		// general
@@ -235,16 +261,41 @@ void CView::GetDispInfoJob(NMLVDISPINFO * di) {
 				GetJobLimitsInfo(item.pszText, item.cchTextMax, index, item.iSubItem);
 				break;
 
+			case 3:		// open handles
+				GetJobOpenHandlesInfo(item.pszText, item.cchTextMax, index, item.iSubItem);
+				break;
+
 		}
 	}
 }
 
 void CView::GetJobLimitsInfo(PWSTR text, DWORD maxLen, int row, int col) {
-	ATLASSERT(row < m_JobLimits.size());
-	if (col > 1)
+	if (row >= m_JobLimits.size() || col > 1)
 		return;
 
 	::StringCchCopy(text, maxLen, col == 0 ? m_JobLimits[row].first : m_JobLimits[row].second);
+}
+
+void CView::GetJobOpenHandlesInfo(PWSTR text, DWORD maxLen, int row, int col) {
+	auto& ohs = m_Job->OpenHandles;
+	if (row >= ohs.size())
+		return;
+
+	auto& oh = ohs[row];
+
+	switch (col) {
+		case 0:
+			::StringCchPrintf(text, maxLen, L"Handle: %d (0x%X)", oh.hJob, oh.hJob);
+			break;
+
+		case 1:
+			::StringCchPrintf(text, maxLen, L"PID: %d (0x%X)", oh.ProcessId, oh.ProcessId);
+			break;
+
+		case 2:
+			::StringCchCopy(text, maxLen, ProcessHelper::GetProcessName(oh.ProcessId));
+			break;
+	}
 }
 
 bool CView::CompareJobs(const JobObjectEntry * j1, const JobObjectEntry * j2, const SortInfo * si) {
@@ -275,6 +326,9 @@ PCWSTR CView::GetSiloType(const JobObjectEntry * job) {
 }
 
 void CView::GetGeneralJobInfo(PWSTR text, DWORD maxLen, int row, int col) {
+	if (row > 9)	// for copy opeerations, could happen
+		return;
+
 	static PCWSTR names[] = {
 		L"Address:", L"Name:", L"Active Processes:", L"Total Processes:",
 		L"User Time:", L"Kernel Time:", L"CPU Time:", L"Terminated Processes:",
@@ -282,7 +336,6 @@ void CView::GetGeneralJobInfo(PWSTR text, DWORD maxLen, int row, int col) {
 	};
 
 	if (col == 0) {
-		ATLASSERT(row < _countof(names));
 		::StringCchCopy(text, maxLen, names[row]);
 		return;
 	}
@@ -298,7 +351,7 @@ void CView::GetGeneralJobInfo(PWSTR text, DWORD maxLen, int row, int col) {
 			break;
 
 		case 1:
-			::StringCchCopy(text, maxLen, m_Job->Name.c_str());
+			::StringCchCopy(text, maxLen, m_Job->Name);
 			break;
 
 		case 2:
@@ -338,7 +391,10 @@ void CView::GetGeneralJobInfo(PWSTR text, DWORD maxLen, int row, int col) {
 }
 
 void CView::GetProcessesJobInfo(PWSTR text, DWORD maxLen, int row, int col) {
-	auto pid = (DWORD)(DWORD)m_Job->Processes[row];
+	if (row >= m_Job->Processes.size())
+		return;
+
+	auto pid = (DWORD)m_Job->Processes[row];
 	if (col == 1) {
 		::StringCchPrintf(text, maxLen, L"PID: %d (0x%X)", pid, pid);
 		return;
@@ -434,6 +490,7 @@ std::vector<std::pair<CString, CString>> CView::GetJobLimits(JobObjectEntry * jo
 	{
 		JOBOBJECT_BASIC_UI_RESTRICTIONS info;
 		if (::QueryInformationJobObject(hJob, JobObjectBasicUIRestrictions, &info, sizeof(info), nullptr) && info.UIRestrictionsClass > 0) {
+			text.Empty();
 			static const struct {
 				PCWSTR Text;
 				DWORD Value;
@@ -452,13 +509,15 @@ std::vector<std::pair<CString, CString>> CView::GetJobLimits(JobObjectEntry * jo
 				if (info.UIRestrictionsClass & u.Value)
 					text += CString(u.Text) + L", ";
 			}
-			limits.push_back({ L"UI:", text.Left(text.GetLength() - 2) });
+			if(text.GetLength() > 0)
+				limits.push_back({ L"UI:", text.Left(text.GetLength() - 2) });
 		}
 	}
 	{
 		JOBOBJECT_CPU_RATE_CONTROL_INFORMATION info;
 		if (::QueryInformationJobObject(hJob, JobObjectCpuRateControlInformation, &info, sizeof(info), nullptr) &&
 			(info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) != 0) {
+			text.Empty();
 			if (info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED) {
 				text.Format(L"Weight: %d", info.Weight);
 			}
@@ -507,12 +566,12 @@ HRESULT __stdcall CView::SetItemPosition(int itemIndex, POINT position) {
 }
 
 HRESULT __stdcall CView::GetItemInGroup(int groupIndex, int groupWideItemIndex, PINT pTotalItemIndex) {
-	*pTotalItemIndex = groupIndex * 10000 + groupWideItemIndex;
+	*pTotalItemIndex = groupIndex * 1000 + groupWideItemIndex;
 	return S_OK;
 }
 
 HRESULT __stdcall CView::GetItemGroup(int itemIndex, int occurenceIndex, PINT pGroupIndex) {
-	*pGroupIndex = itemIndex / 10000;
+	*pGroupIndex = itemIndex / 1000;
 	return S_OK;
 }
 
